@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import '../fcm_token_card.dart';
 
 /// Halaman Informasi User (Setelah Login)
 class UserInfoScreen extends StatelessWidget {
@@ -24,7 +25,7 @@ class UserInfoScreen extends StatelessWidget {
           ),
         ],
       ),
-      body: Center(
+      body: SingleChildScrollView(
         child: Padding(
           padding: const EdgeInsets.all(24.0),
           child: Column(
@@ -47,6 +48,8 @@ class UserInfoScreen extends StatelessWidget {
                 style: const TextStyle(fontSize: 14, color: Colors.grey),
                 textAlign: TextAlign.center,
               ),
+              const SizedBox(height: 24),
+              const FcmTokenCard(),
               const SizedBox(height: 24),
               ElevatedButton.icon(
                 onPressed: _logout,
