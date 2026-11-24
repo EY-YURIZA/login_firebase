@@ -46,3 +46,7 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# Firebase Service Account (rahasia, jangan di-commit)
+service_account.json
+service-account.json
