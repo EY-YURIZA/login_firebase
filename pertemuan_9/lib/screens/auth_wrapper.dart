@@ -19,7 +19,7 @@ class AuthWrapper extends StatelessWidget {
         }
 
         if (snapshot.hasData && snapshot.data != null) {
-          return UserInfoScreen(user: snapshot.data!);
+        return const UserInfoScreen();;
         }
 
         return const LoginScreen();
