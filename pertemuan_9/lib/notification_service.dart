@@ -1,4 +1,5 @@
 import 'dart:convert';
+
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
@@ -6,101 +7,106 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'firebase_options.dart';
 import 'notification_detail_screen.dart';
 
-/// Top-level handler untuk menangani pesan FCM saat aplikasi di background / terminated.
+/// Kunci global Navigator, supaya kita bisa pindah halaman
+/// dari luar widget (misalnya saat notifikasi di-klik).
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
+
+/// HANDLER BACKGROUND / TERMINATED
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-  debugPrint('Background message diterima: ${message.messageId}');
+  debugPrint('[FCM] Pesan BACKGROUND: ${message.messageId}');
+  debugPrint('[FCM] Data: ${message.data}');
 }
 
-/// Service untuk inisialisasi FCM, local notification, dan navigasi notifikasi.
 class NotificationService {
-  static final NotificationService instance = NotificationService._internal();
-  factory NotificationService() => instance;
-  NotificationService._internal();
+  NotificationService._();
 
-  final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
-  final FirebaseMessaging _messaging = FirebaseMessaging.instance;
-  final FlutterLocalNotificationsPlugin _localNotifications =
+  static final FirebaseMessaging _messaging = FirebaseMessaging.instance;
+  static final FlutterLocalNotificationsPlugin _localNotif =
       FlutterLocalNotificationsPlugin();
 
   static const AndroidNotificationChannel _channel = AndroidNotificationChannel(
     'high_importance_channel',
-    'High Importance Notifications',
-    description: 'Channel untuk notifikasi penting dari Firebase Cloud Messaging',
+    'Notifikasi Penting',
+    description: 'Channel untuk notifikasi dari Firebase Cloud Messaging',
     importance: Importance.max,
   );
 
-  /// Menggabungkan notification (title, body) menjadi satu .
-  Map<String, dynamic> _messageToMap(RemoteMessage message) {
-    return {
-      'title': message.notification?.title ?? message.data['title'] ?? '',
-      'body': message.notification?.body ?? message.data['body'] ?? '',
-      ...message.data,
-    };
-  }
-
-  /// Inisialisasi izin notifikasi, channel Android, dan listener FCM.
-  Future<void> initialize() async {
-    
-    await _messaging.requestPermission(
+  static Future<void> init() async {
+    // 1. Minta izin notifikasi (Android 13+ akan muncul dialog izin)
+    final settings = await _messaging.requestPermission(
       alert: true,
       badge: true,
       sound: true,
     );
+    debugPrint('[FCM] Status izin: ${settings.authorizationStatus}');
 
-    final androidPlugin =
-        _localNotifications.resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>();
-    await androidPlugin?.requestNotificationsPermission();
-    await androidPlugin?.createNotificationChannel(_channel);
-
-    //  Inisialisasi Flutter Local Notifications untuk tampilan saat foreground
+    // 2. Inisialisasi flutter_local_notifications + buat channel
     const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
-    const initSettings = InitializationSettings(android: androidInit);
-
-    await _localNotifications.initialize(
-      settings: initSettings,
+    await _localNotif.initialize(
+      settings: const InitializationSettings(android: androidInit),
       onDidReceiveNotificationResponse: (NotificationResponse response) {
-        if (response.payload != null && response.payload!.isNotEmpty) {
-          final decoded =
-              jsonDecode(response.payload!) as Map<String, dynamic>;
-          _openDetailScreen(decoded);
+        if (response.payload != null) {
+          _openDetail(jsonDecode(response.payload!) as Map<String, dynamic>);
         }
       },
     );
+    await _localNotif
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >()
+        ?.createNotificationChannel(_channel);
 
-    await _messaging.setForegroundNotificationPresentationOptions(
-      alert: true,
-      badge: true,
-      sound: true,
-    );
+    // 3. Ambil FCM Token
+    try {
+      // ignore: deprecated_member_use
+      final token = await _messaging.getToken();
+      debugPrint('[FCM] TOKEN: $token');
+    } catch (e) {
+      debugPrint('[FCM] Gagal mengambil token: $e');
+    }
+    // ignore: deprecated_member_use
+    _messaging.onTokenRefresh.listen((newToken) {
+      debugPrint('[FCM] TOKEN BARU: $newToken');
+    });
 
-    // saat aplikasi terbuka (Foreground)
-    FirebaseMessaging.onMessage.listen(_handleForegroundMessage);
+    // 4. Subscribe ke topic "kelas"
+    await _messaging.subscribeToTopic('kelas');
 
-    // saat notifikasi diklik dari kondisi Background
-    FirebaseMessaging.onMessageOpenedApp.listen(_handleMessageOpenedApp);
+    // 5. FOREGROUND: pesan masuk saat aplikasi sedang dibuka
+    FirebaseMessaging.onMessage.listen(_showForegroundNotification);
 
-    // Cek jika aplikasi dibuka dari notifikasi saat kondisi Terminated
+    // 6. BACKGROUND -> klik notifikasi -> aplikasi kembali terbuka
+    FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
+      debugPrint('[FCM] Dibuka dari BACKGROUND');
+      _openDetail(_messageToMap(message));
+    });
+
+    // 7. TERMINATED -> klik notifikasi -> aplikasi dijalankan dari awal
     final initialMessage = await _messaging.getInitialMessage();
     if (initialMessage != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _handleMessageOpenedApp(initialMessage);
-      });
+      debugPrint('[FCM] Dibuka dari kondisi MATI (terminated)');
+      _openDetail(_messageToMap(initialMessage));
+    }
+
+    // 8. Aplikasi dibuka dari notifikasi LOKAL saat app sudah mati
+    final launchDetails = await _localNotif.getNotificationAppLaunchDetails();
+    final payload = launchDetails?.notificationResponse?.payload;
+    if ((launchDetails?.didNotificationLaunchApp ?? false) && payload != null) {
+      _openDetail(jsonDecode(payload) as Map<String, dynamic>);
     }
   }
 
-  /// Menampilkan banner notifikasi lokal saat aplikasi di foreground.
-  Future<void> _handleForegroundMessage(RemoteMessage message) async {
-    final data = _messageToMap(message);
-    final title = data['title']?.toString() ?? 'Notifikasi';
-    final body = data['body']?.toString() ?? '';
+  static Future<void> _showForegroundNotification(RemoteMessage message) async {
+    debugPrint('[FCM] Pesan FOREGROUND: ${message.notification?.title}');
+    final notification = message.notification;
+    if (notification == null) return;
 
-    await _localNotifications.show(
-      id: message.hashCode,
-      title: title,
-      body: body,
+    await _localNotif.show(
+      id: notification.hashCode,
+      title: notification.title,
+      body: notification.body,
       notificationDetails: NotificationDetails(
         android: AndroidNotificationDetails(
           _channel.id,
@@ -111,25 +117,31 @@ class NotificationService {
           icon: '@mipmap/ic_launcher',
         ),
       ),
-      payload: jsonEncode(data),
+      payload: jsonEncode(_messageToMap(message)),
     );
   }
 
-  /// Menangani klik notifikasi dari background / terminated.
-  void _handleMessageOpenedApp(RemoteMessage message) {
-    _openDetailScreen(_messageToMap(message));
+  static Map<String, dynamic> _messageToMap(RemoteMessage message) {
+    return {
+      'title': message.notification?.title ?? '-',
+      'body': message.notification?.body ?? '-',
+      ...message.data,
+    };
   }
 
-  void _openDetailScreen(Map<String, dynamic> data) {
-    navigatorKey.currentState?.push(
-      MaterialPageRoute(
-        builder: (_) => NotificationDetailScreen(data: data),
-      ),
-    );
-  }
+  static void _openDetail(Map<String, dynamic> data) {
+    void push() {
+      navigatorKey.currentState?.push(
+        MaterialPageRoute(
+          builder: (_) => NotificationDetailScreen(data: data),
+        ),
+      );
+    }
 
-  /// Mengambil FCM Token perangkat saat ini.
-  Future<String?> getToken() async {
-    return await _messaging.getToken();
+    if (navigatorKey.currentState != null) {
+      push();
+    } else {
+      WidgetsBinding.instance.addPostFrameCallback((_) => push());
+    }
   }
 }
